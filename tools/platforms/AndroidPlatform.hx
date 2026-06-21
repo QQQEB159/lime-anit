@@ -11,6 +11,7 @@ import lime.tools.Architecture;
 import lime.tools.Asset;
 import lime.tools.AssetHelper;
 import lime.tools.AssetType;
+import lime.tools.ASTCTextureHelper;
 import lime.tools.CPPHelper;
 import lime.tools.DeploymentHelper;
 import lime.tools.HXProject;
@@ -656,6 +657,7 @@ class AndroidPlatform extends PlatformTarget
 
 	public override function update():Void
 	{
+		ASTCTextureHelper.prepareProjectAssets(project, targetDirectory);
 		AssetHelper.processLibraries(project, targetDirectory);
 
 		// project = project.clone ();
@@ -699,7 +701,8 @@ class AndroidPlatform extends PlatformTarget
 			{
 				if (asset.deliveryPackName != '')
 				{
-					AssetHelper.copyAssetIfNewer(asset, Path.combine(destination + "/" + asset.deliveryPackName + "/src/main/assets/", asset.resourceName));
+					var assetDestination = Path.combine(destination + "/" + asset.deliveryPackName + "/src/main/assets/", asset.resourceName);
+					AssetHelper.copyAssetIfNewer(asset, assetDestination);
 
 					if (!context.ANDROID_PLAY_ASSETS_DELIVERY_PACKS.contains(asset.deliveryPackName))
 					{
@@ -712,9 +715,14 @@ class AndroidPlatform extends PlatformTarget
 					}
 				}
 				else
-					AssetHelper.copyAssetIfNewer(asset, Path.combine(sourceSet + "/assets/", asset.resourceName));
+				{
+					var assetDestination = Path.combine(sourceSet + "/assets/", asset.resourceName);
+					AssetHelper.copyAssetIfNewer(asset, assetDestination);
+				}
 			}
 		}
+
+		ASTCTextureHelper.finish(project);
 
 		cleanEmbeddedAndroidAssetOutputs(sourceSet, destination);
 		cleanEmbeddedAndroidModFormatOutputs(sourceSet);
