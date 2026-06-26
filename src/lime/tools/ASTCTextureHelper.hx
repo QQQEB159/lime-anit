@@ -35,7 +35,8 @@ class ASTCTextureHelper
 
 		Log.info("", " - \x1b[1mASTC texture conversion enabled:\x1b[0m block=" + getBlockSize(project)
 			+ " quality=" + getQuality(project) + " colorprofile=" + getColorProfile(project)
-			+ " premultiplyAlpha=" + getPremultiplyAlpha(project));
+			+ " premultiplyAlpha=" + getPremultiplyAlpha(project)
+			+ " smartBlocks=" + getSmartBlocks(project) + " detailBlock=" + getDetailBlockSize(project));
 
 		if (!hasEncoder())
 		{
@@ -120,7 +121,11 @@ class ASTCTextureHelper
 		if (input == null || input == "" || !FileSystem.exists(input))
 			return false;
 
-		if (FileSystem.exists(output) && FileSystem.exists(getMetaPath(output)) && !System.isNewer(input, output) && File.getContent(getMetaPath(output)) == getMeta(project))
+		var info = analyzeInput(input);
+		var blockSize = getEffectiveBlockSize(project, input, info);
+		var meta = getMeta(project, blockSize);
+
+		if (FileSystem.exists(output) && FileSystem.exists(getMetaPath(output)) && !System.isNewer(input, output) && File.getContent(getMetaPath(output)) == meta)
 		{
 			skipped++;
 			return true;
@@ -136,15 +141,15 @@ class ASTCTextureHelper
 		var encoder = getDirectEncoder();
 		var source = prepareInputPNG(project, input, output);
 		if (encoder != null && encoder != "")
-			ok = compressWithAstcenc(project, encoder, source, output);
+			ok = compressWithAstcenc(project, encoder, source, output, blockSize);
 		else
-			ok = compressWithAstcCompressor(project, source, output);
+			ok = compressWithAstcCompressor(project, source, output, blockSize);
 
 		if (ok && FileSystem.exists(output))
 		{
-			File.saveContent(getMetaPath(output), getMeta(project));
+			File.saveContent(getMetaPath(output), meta);
 			converted++;
-			Log.info("", " - \x1b[1mWriting ASTC texture:\x1b[0m " + output);
+			Log.info("", " - \x1b[1mWriting ASTC texture:\x1b[0m " + output + " block=" + blockSize);
 			return true;
 		}
 		else
@@ -174,6 +179,11 @@ class ASTCTextureHelper
 		return sanitize(project.config.getString("android.astc-blocksize", "4x4"), "4x4");
 	}
 
+	private static function getDetailBlockSize(project:HXProject):String
+	{
+		return sanitize(project.config.getString("android.astc-detail-blocksize", "4x4"), "4x4");
+	}
+
 	private static function getQuality(project:HXProject):String
 	{
 		return sanitize(project.config.getString("android.astc-quality", "thorough"), "thorough");
@@ -192,12 +202,18 @@ class ASTCTextureHelper
 		return project.config.getBool("android.astc-premultiply-alpha", true);
 	}
 
-	private static function getMeta(project:HXProject):String
+	private static function getSmartBlocks(project:HXProject):Bool
 	{
-		return "block=" + getBlockSize(project)
+		return project.config.getBool("android.astc-smart-blocks", true);
+	}
+
+	private static function getMeta(project:HXProject, blockSize:String):String
+	{
+		return "block=" + blockSize
 			+ "\nquality=" + getQuality(project)
 			+ "\ncolorprofile=" + getColorProfile(project)
 			+ "\npremultiplyAlpha=" + getPremultiplyAlpha(project)
+			+ "\nsmartBlocks=" + getSmartBlocks(project)
 			+ "\n";
 	}
 
@@ -269,18 +285,100 @@ class ASTCTextureHelper
 		}
 	}
 
-	private static function compressWithAstcenc(project:HXProject, encoder:String, input:String, output:String):Bool
+	private static function analyzeInput(input:String):ASTCImageInfo
+	{
+		var info = new ASTCImageInfo();
+		try
+		{
+			var image = Image.fromFile(input);
+			if (image == null || image.buffer == null || image.buffer.data == null)
+				return info;
+
+			image.format = PixelFormat.RGBA32;
+			var data = image.buffer.data;
+			var pixels = image.width * image.height;
+			if (pixels <= 0)
+				return info;
+
+			info.width = image.width;
+			info.height = image.height;
+
+			var transparent = 0;
+			var semiTransparent = 0;
+			for (i in 0...pixels)
+			{
+				var alpha = data[(i * 4) + 3];
+				if (alpha <= 8)
+					transparent++;
+				else if (alpha < 248)
+					semiTransparent++;
+			}
+
+			info.transparentRatio = transparent / pixels;
+			info.semiTransparentRatio = semiTransparent / pixels;
+		}
+		catch (e:Dynamic) {}
+		return info;
+	}
+
+	private static function getEffectiveBlockSize(project:HXProject, input:String, info:ASTCImageInfo):String
+	{
+		var baseBlock = getBlockSize(project);
+		if (!getSmartBlocks(project))
+			return baseBlock;
+
+		var detailBlock = getDetailBlockSize(project);
+		if (baseBlock == detailBlock || info == null || info.width <= 0 || info.height <= 0)
+			return baseBlock;
+
+		var path = normalize(input).toLowerCase();
+		var maxSide = Std.int(Math.max(info.width, info.height));
+		var minSide = Std.int(Math.min(info.width, info.height));
+		var detailMaxSide = project.config.getInt("android.astc-detail-max-side", 1024);
+		var detailMinSide = project.config.getInt("android.astc-detail-min-side", 256);
+		var alphaRatio = project.config.getFloat("android.astc-detail-alpha-ratio", 0.08);
+		var semiAlphaRatio = project.config.getFloat("android.astc-detail-semi-alpha-ratio", 0.01);
+
+		var sensitivePath = path.indexOf("/ui/") != -1
+			|| path.indexOf("/hud") != -1
+			|| path.indexOf("/mobile") != -1
+			|| path.indexOf("/notes") != -1
+			|| path.indexOf("/note") != -1
+			|| path.indexOf("/arrow") != -1
+			|| path.indexOf("/strum") != -1
+			|| path.indexOf("/splash") != -1
+			|| path.indexOf("/menu") != -1
+			|| path.indexOf("/menus") != -1
+			|| path.indexOf("/icon") != -1
+			|| path.indexOf("/icons") != -1
+			|| path.indexOf("/title") != -1
+			|| path.indexOf("/logo") != -1
+			|| path.indexOf("/fonts") != -1;
+
+		if (sensitivePath)
+			return detailBlock;
+		if (maxSide <= detailMaxSide)
+			return detailBlock;
+		if (minSide <= detailMinSide)
+			return detailBlock;
+		if (info.transparentRatio >= alphaRatio || info.semiTransparentRatio >= semiAlphaRatio)
+			return detailBlock;
+
+		return baseBlock;
+	}
+
+	private static function compressWithAstcenc(project:HXProject, encoder:String, input:String, output:String, blockSize:String):Bool
 	{
 		var profile = "-" + getColorProfile(project);
 		var quality = getQuality(project);
 		if (!StringTools.startsWith(quality, "-"))
 			quality = "-" + quality;
 
-		var code = System.runCommand("", encoder, [profile, input, output, getBlockSize(project), quality], true, true);
+		var code = System.runCommand("", encoder, [profile, input, output, blockSize, quality], true, true);
 		return code == 0;
 	}
 
-	private static function compressWithAstcCompressor(project:HXProject, input:String, output:String):Bool
+	private static function compressWithAstcCompressor(project:HXProject, input:String, output:String, blockSize:String):Bool
 	{
 		if (!hasAstcCompressor())
 			return false;
@@ -293,7 +391,7 @@ class ASTCTextureHelper
 			"-i",
 			input,
 			"-blocksize",
-			getBlockSize(project),
+			blockSize,
 			"-quality",
 			getQuality(project),
 			"-colorprofile",
@@ -501,4 +599,14 @@ class ASTCTextureHelper
 		missingWarned = true;
 		Log.warn("ASTC conversion skipped. Install `astc-compressor` or set ASTC_ENCODER to an astcenc executable.");
 	}
+}
+
+private class ASTCImageInfo
+{
+	public var width:Int = 0;
+	public var height:Int = 0;
+	public var transparentRatio:Float = 0;
+	public var semiTransparentRatio:Float = 0;
+
+	public function new() {}
 }
