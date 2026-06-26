@@ -4,6 +4,9 @@ import hxp.Haxelib;
 import hxp.Log;
 import hxp.Path;
 import hxp.System;
+import lime.graphics.Image;
+import lime.graphics.ImageFileFormat;
+import lime.graphics.PixelFormat;
 import lime.tools.Asset;
 import lime.tools.HXProject;
 import sys.io.File;
@@ -31,7 +34,8 @@ class ASTCTextureHelper
 			return;
 
 		Log.info("", " - \x1b[1mASTC texture conversion enabled:\x1b[0m block=" + getBlockSize(project)
-			+ " quality=" + getQuality(project) + " colorprofile=" + getColorProfile(project));
+			+ " quality=" + getQuality(project) + " colorprofile=" + getColorProfile(project)
+			+ " premultiplyAlpha=" + getPremultiplyAlpha(project));
 
 		if (!hasEncoder())
 		{
@@ -130,10 +134,11 @@ class ASTCTextureHelper
 
 		var ok = false;
 		var encoder = getDirectEncoder();
+		var source = prepareInputPNG(project, input, output);
 		if (encoder != null && encoder != "")
-			ok = compressWithAstcenc(project, encoder, input, output);
+			ok = compressWithAstcenc(project, encoder, source, output);
 		else
-			ok = compressWithAstcCompressor(project, input, output);
+			ok = compressWithAstcCompressor(project, source, output);
 
 		if (ok && FileSystem.exists(output))
 		{
@@ -182,9 +187,18 @@ class ASTCTextureHelper
 		return profile;
 	}
 
+	private static function getPremultiplyAlpha(project:HXProject):Bool
+	{
+		return project.config.getBool("android.astc-premultiply-alpha", true);
+	}
+
 	private static function getMeta(project:HXProject):String
 	{
-		return "block=" + getBlockSize(project) + "\nquality=" + getQuality(project) + "\ncolorprofile=" + getColorProfile(project) + "\n";
+		return "block=" + getBlockSize(project)
+			+ "\nquality=" + getQuality(project)
+			+ "\ncolorprofile=" + getColorProfile(project)
+			+ "\npremultiplyAlpha=" + getPremultiplyAlpha(project)
+			+ "\n";
 	}
 
 	private static function getMetaPath(output:String):String
@@ -198,6 +212,61 @@ class ASTCTextureHelper
 			return fallback;
 		value = StringTools.trim(value);
 		return value == "" ? fallback : value;
+	}
+
+	private static function prepareInputPNG(project:HXProject, input:String, output:String):String
+	{
+		if (!getPremultiplyAlpha(project))
+			return input;
+
+		var temp = output + ".premul.png";
+		if (FileSystem.exists(temp) && !System.isNewer(input, temp))
+			return temp;
+
+		try
+		{
+			var image = Image.fromFile(input);
+			if (image == null || image.buffer == null || image.buffer.data == null)
+				return input;
+
+			image.format = PixelFormat.RGBA32;
+			if (image.premultiplied)
+				image.premultiplied = false;
+
+			var data = image.buffer.data;
+			var pixels = image.width * image.height;
+			for (i in 0...pixels)
+			{
+				var offset = i * 4;
+				var alpha = data[offset + 3];
+				if (alpha <= 0)
+				{
+					data[offset] = 0;
+					data[offset + 1] = 0;
+					data[offset + 2] = 0;
+				}
+				else if (alpha < 255)
+				{
+					data[offset] = Std.int((data[offset] * alpha + 127) / 255);
+					data[offset + 1] = Std.int((data[offset + 1] * alpha + 127) / 255);
+					data[offset + 2] = Std.int((data[offset + 2] * alpha + 127) / 255);
+				}
+			}
+
+			image.buffer.premultiplied = false;
+			var encoded = image.encode(ImageFileFormat.PNG);
+			if (encoded == null || encoded.length == 0)
+				return input;
+
+			System.mkdir(Path.directory(temp));
+			File.saveBytes(temp, encoded);
+			return temp;
+		}
+		catch (e:Dynamic)
+		{
+			Log.warn("ASTC premultiply alpha preprocess failed: " + input + " (" + e + ")");
+			return input;
+		}
 	}
 
 	private static function compressWithAstcenc(project:HXProject, encoder:String, input:String, output:String):Bool
