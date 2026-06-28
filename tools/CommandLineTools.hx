@@ -655,7 +655,7 @@ class CommandLineTools
 			return false;
 		}
 
-		if (!isAndroidReuseAssetsRequested() || targetFlags.exists("clean") || targetFlags.exists("rebuild") || additionalArguments.length > 0)
+		if (!isAndroidReuseAssetsRequested() || targetFlags.exists("clean") || targetFlags.exists("rebuild"))
 		{
 			return false;
 		}
@@ -707,7 +707,14 @@ class CommandLineTools
 		var haxeParams = [hxml, "-D", "android", "-D", "HXCPP_ANDROID_PLATFORM=" + minSDKVer, "-D", archDefine];
 
 		Log.info("", Log.accentColor + "Reusing Android assets/project output: skipping project XML asset scan" + Log.resetColor);
-		System.runCommand("", "haxe", haxeParams);
+		if (shouldSkipAndroidReuseHaxe(objDirectory))
+		{
+			Log.info("", Log.accentColor + "Reusing generated Android C++ output: source/project files unchanged" + Log.resetColor);
+		}
+		else
+		{
+			System.runCommand("", "haxe", haxeParams);
+		}
 
 		runAndroidReuseHxcpp(objDirectory, options, archDefine, minSDKVer);
 		copyAndroidReuseLibrary(objDirectory, sourceSet, archDefine);
@@ -715,6 +722,85 @@ class CommandLineTools
 		runAndroidReuseGradle(gradleProject, buildType);
 
 		return true;
+	}
+
+	private function shouldSkipAndroidReuseHaxe(objDirectory:String):Bool
+	{
+		if (isDisabledEnvironmentFlag("ANDROID_REUSE_HAXE"))
+		{
+			return false;
+		}
+
+		var generated = Path.combine(objDirectory, "src/ApplicationMain.cpp");
+		if (!FileSystem.exists(generated))
+		{
+			return false;
+		}
+
+		var generatedTime = 0.0;
+		try
+		{
+			generatedTime = FileSystem.stat(generated).mtime.getTime();
+		}
+		catch (e:Dynamic)
+		{
+			return false;
+		}
+
+		for (path in ["project.xml", "Project.xml", "source", "Source"])
+		{
+			if (isAndroidReuseInputNewer(path, generatedTime))
+			{
+				Log.info("", " - Android reuse cache invalidated by newer input: " + path);
+				return false;
+			}
+		}
+
+		return true;
+	}
+
+	private function isAndroidReuseInputNewer(path:String, referenceTime:Float):Bool
+	{
+		if (!FileSystem.exists(path))
+		{
+			return false;
+		}
+
+		try
+		{
+			if (!FileSystem.isDirectory(path))
+			{
+				return FileSystem.stat(path).mtime.getTime() > referenceTime;
+			}
+
+			for (entry in FileSystem.readDirectory(path))
+			{
+				if (entry == "." || entry == "..")
+				{
+					continue;
+				}
+
+				if (isAndroidReuseInputNewer(Path.combine(path, entry), referenceTime))
+				{
+					return true;
+				}
+			}
+		}
+		catch (e:Dynamic) {}
+
+		return false;
+	}
+
+	private function isDisabledEnvironmentFlag(name:String):Bool
+	{
+		var value = Sys.getEnv(name);
+		if (value == null)
+		{
+			return false;
+		}
+
+		value = StringTools.trim(value).toLowerCase();
+		return value == "0" || value == "false" || value == "no" || value == "off";
 	}
 
 	private function getRequestedTargetName():String
