@@ -121,6 +121,11 @@ class CommandLineTools
 					return;
 				}
 
+				if (tryAndroidReuseAssetsCommand())
+				{
+					return;
+				}
+
 				var project = initializeProject();
 				buildProject(project);
 
@@ -640,6 +645,300 @@ class CommandLineTools
 			{
 				Log.error("\"" + Std.string(project.target) + "\" is an unknown target");
 			}
+		}
+	}
+
+	private function tryAndroidReuseAssetsCommand():Bool
+	{
+		if ((command != "build" && command != "display") || getRequestedTargetName() != "android")
+		{
+			return false;
+		}
+
+		if (!isAndroidReuseAssetsRequested() || targetFlags.exists("clean") || targetFlags.exists("rebuild") || additionalArguments.length > 0)
+		{
+			return false;
+		}
+
+		var buildType = debug ? "debug" : (targetFlags.exists("final") ? "final" : "release");
+		var targetDirectory = Path.join([Sys.getCwd(), "export", buildType, "android"]);
+		var gradleProject = Path.combine(targetDirectory, "bin");
+		var sourceSet = Path.combine(gradleProject, "app/src/main");
+		var hxml = Path.combine(targetDirectory, "haxe/" + buildType + ".hxml");
+		var objDirectory = Path.combine(targetDirectory, "obj");
+		var options = Path.combine(objDirectory, "Options.txt");
+		var buildFile = Path.combine(objDirectory, "Build.xml");
+
+		if (!FileSystem.exists(hxml)
+			|| !FileSystem.exists(Path.combine(sourceSet, "assets"))
+			|| !FileSystem.exists(Path.combine(gradleProject, "app/build.gradle"))
+			|| !FileSystem.exists(options)
+			|| !FileSystem.exists(buildFile))
+		{
+			return false;
+		}
+
+		if (command == "display")
+		{
+			if (targetFlags.exists("output-file"))
+			{
+				var outputType = targetFlags.exists("bundle") ? "bundle" : "apk";
+				var outputExt = targetFlags.exists("bundle") ? ".aab" : ".apk";
+				Sys.println(Path.join([FileSystem.fullPath(targetDirectory), "bin/app/build/outputs", outputType, buildType, "bikini-horrors-" + buildType + outputExt]));
+			}
+			else
+			{
+				Sys.println(File.getContent(hxml));
+			}
+			return true;
+		}
+
+		var hxmlContent = File.getContent(hxml);
+		var archDefine = getAndroidReuseArchitecture(hxmlContent);
+		if (archDefine == null)
+		{
+			Log.warn("", "ANDROID_REUSE_ASSETS only fast-builds a single selected Android architecture; falling back to normal Lime build.");
+			return false;
+		}
+
+		applyAndroidReuseEnvironment(options);
+
+		var minSDKVer = getAndroidReuseOption(options, "HXCPP_ANDROID_PLATFORM", "24");
+		var haxeParams = [hxml, "-D", "android", "-D", "HXCPP_ANDROID_PLATFORM=" + minSDKVer, "-D", archDefine];
+
+		Log.info("", Log.accentColor + "Reusing Android assets/project output: skipping project XML asset scan" + Log.resetColor);
+		System.runCommand("", "haxe", haxeParams);
+
+		runAndroidReuseHxcpp(objDirectory, options, archDefine, minSDKVer);
+		copyAndroidReuseLibrary(objDirectory, sourceSet, archDefine);
+		removeUnusedAndroidReuseJniDirs(sourceSet, archDefine);
+		runAndroidReuseGradle(gradleProject, buildType);
+
+		return true;
+	}
+
+	private function getRequestedTargetName():String
+	{
+		if (words.length == 2)
+		{
+			return words[1].toLowerCase();
+		}
+		else if (words.length == 1)
+		{
+			return words[0].toLowerCase();
+		}
+
+		return "";
+	}
+
+	private function isAndroidReuseAssetsRequested():Bool
+	{
+		if (userDefines.exists("ANDROID_REUSE_ASSETS") || targetFlags.exists("ANDROID_REUSE_ASSETS"))
+		{
+			return true;
+		}
+
+		var value = Sys.getEnv("ANDROID_REUSE_ASSETS");
+		if (value == null)
+		{
+			return false;
+		}
+
+		value = value.toLowerCase();
+		return value != "" && value != "0" && value != "false" && value != "no";
+	}
+
+	private function getAndroidReuseArchitecture(hxmlContent:String):String
+	{
+		if (userDefines.exists("ONLY_ARM64") || hxmlContent.indexOf("-D ONLY_ARM64") > -1 || hxmlContent.indexOf("-DONLY_ARM64") > -1)
+		{
+			return "HXCPP_ARM64";
+		}
+		else if (userDefines.exists("ONLY_ARMV7") || hxmlContent.indexOf("-D ONLY_ARMV7") > -1 || hxmlContent.indexOf("-DONLY_ARMV7") > -1)
+		{
+			return "HXCPP_ARMV7";
+		}
+		else if (userDefines.exists("ONLY_X86_64") || hxmlContent.indexOf("-D ONLY_X86_64") > -1 || hxmlContent.indexOf("-DONLY_X86_64") > -1)
+		{
+			return "HXCPP_X86_64";
+		}
+		else if (userDefines.exists("ONLY_X86") || hxmlContent.indexOf("-D ONLY_X86") > -1 || hxmlContent.indexOf("-DONLY_X86") > -1)
+		{
+			return "HXCPP_X86";
+		}
+
+		return null;
+	}
+
+	private function getAndroidReuseOption(optionsPath:String, key:String, fallback:String):String
+	{
+		try
+		{
+			for (line in File.getContent(optionsPath).split("\n"))
+			{
+				line = StringTools.trim(line);
+				var prefix = key + "=";
+				if (StringTools.startsWith(line, prefix))
+				{
+					return line.substr(prefix.length);
+				}
+			}
+		}
+		catch (e:Dynamic) {}
+
+		return fallback;
+	}
+
+	private function applyAndroidReuseEnvironment(optionsPath:String):Void
+	{
+		var javaHome = getAndroidReuseOption(optionsPath, "JAVA_HOME", Sys.getEnv("JAVA_HOME"));
+		var androidSDK = getAndroidReuseOption(optionsPath, "ANDROID_SDK", Sys.getEnv("ANDROID_SDK"));
+		var androidNDK = getAndroidReuseOption(optionsPath, "ANDROID_NDK_ROOT", Sys.getEnv("ANDROID_NDK_ROOT"));
+
+		if (javaHome != null && javaHome != "")
+		{
+			Sys.putEnv("JAVA_HOME", javaHome);
+
+			if (System.hostPlatform == WINDOWS)
+			{
+				var javaBin = Path.combine(javaHome, "bin");
+				var path = Sys.getEnv("PATH");
+				if (path != null && path.indexOf(javaBin) == -1)
+				{
+					Sys.putEnv("PATH", javaBin + ";" + path);
+				}
+			}
+		}
+
+		if (androidSDK != null && androidSDK != "") Sys.putEnv("ANDROID_SDK", androidSDK);
+		if (androidNDK != null && androidNDK != "") Sys.putEnv("ANDROID_NDK_ROOT", androidNDK);
+	}
+
+	private function runAndroidReuseHxcpp(objDirectory:String, optionsPath:String, archDefine:String, minSDKVer:String):Void
+	{
+		var args = [
+			"run",
+			"hxcpp",
+			"Build.xml",
+			"-options",
+			Path.tryFullPath(optionsPath),
+			"-Dandroid",
+			"-DHXCPP_ANDROID_PLATFORM=" + minSDKVer,
+			"-D" + archDefine
+		];
+
+		if (debug)
+		{
+			args.push("-debug");
+		}
+
+		if (Log.verbose)
+		{
+			args.push("-verbose");
+		}
+
+		if (!Log.enableColor)
+		{
+			Sys.putEnv("HXCPP_NO_COLOR", "");
+		}
+
+		if (System.hostPlatform == WINDOWS && Sys.getEnv("HXCPP_COMPILE_THREADS") == null)
+		{
+			Sys.putEnv("HXCPP_COMPILE_THREADS", Std.string(Math.max(1, System.processorCores - 1)));
+		}
+
+		Sys.putEnv("HXCPP_EXIT_ON_ERROR", "");
+
+		var code = Haxelib.runCommand(objDirectory, args);
+		if (code != 0)
+		{
+			Sys.exit(code);
+		}
+	}
+
+	private function copyAndroidReuseLibrary(objDirectory:String, sourceSet:String, archDefine:String):Void
+	{
+		var suffix = getAndroidReuseLibrarySuffix(archDefine);
+		var jniDir = Path.combine(sourceSet, "jniLibs/" + getAndroidReuseJniDirectory(archDefine));
+		var source = Path.combine(objDirectory, "libApplicationMain" + (debug ? "-debug" : "") + suffix);
+
+		if (!FileSystem.exists(source))
+		{
+			Log.error("Missing Android native library after hxcpp build: " + source);
+			return;
+		}
+
+		System.mkdir(jniDir);
+		System.copyIfNewer(source, Path.combine(jniDir, "libApplicationMain.so"));
+	}
+
+	private function removeUnusedAndroidReuseJniDirs(sourceSet:String, archDefine:String):Void
+	{
+		var keep = getAndroidReuseJniDirectory(archDefine);
+		var base = Path.combine(sourceSet, "jniLibs");
+
+		if (!FileSystem.exists(base))
+		{
+			return;
+		}
+
+		for (dir in ["arm64-v8a", "armeabi-v7a", "armeabi", "x86_64", "x86"])
+		{
+			var path = Path.combine(base, dir);
+			if (dir != keep && FileSystem.exists(path))
+			{
+				System.removeDirectory(path);
+			}
+		}
+	}
+
+	private function getAndroidReuseLibrarySuffix(archDefine:String):String
+	{
+		return switch (archDefine)
+		{
+			case "HXCPP_ARM64": "-64.so";
+			case "HXCPP_ARMV7": "-v7.so";
+			case "HXCPP_X86_64": "-x86_64.so";
+			case "HXCPP_X86": "-x86.so";
+			default: ".so";
+		}
+	}
+
+	private function getAndroidReuseJniDirectory(archDefine:String):String
+	{
+		return switch (archDefine)
+		{
+			case "HXCPP_ARM64": "arm64-v8a";
+			case "HXCPP_ARMV7": "armeabi-v7a";
+			case "HXCPP_X86_64": "x86_64";
+			case "HXCPP_X86": "x86";
+			default: "";
+		}
+	}
+
+	private function runAndroidReuseGradle(gradleProject:String, buildType:String):Void
+	{
+		var task = targetFlags.exists("bundle") ? "bundleDebug" : "assembleDebug";
+
+		if (buildType != "debug")
+		{
+			task = targetFlags.exists("bundle") ? "bundleRelease" : "assembleRelease";
+		}
+
+		var args = [task];
+		if (Log.verbose)
+		{
+			args.push("--info");
+		}
+
+		if (System.hostPlatform != WINDOWS)
+		{
+			System.runCommand("", "chmod", ["755", Path.combine(gradleProject, "gradlew")]);
+			System.runCommand(gradleProject, "./gradlew", args);
+		}
+		else
+		{
+			System.runCommand(gradleProject, "gradlew", args);
 		}
 	}
 

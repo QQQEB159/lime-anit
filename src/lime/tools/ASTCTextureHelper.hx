@@ -22,6 +22,7 @@ class ASTCTextureHelper
 	private static var skipped:Int = 0;
 	private static var failed:Int = 0;
 	private static var strippedPNG:Int = 0;
+	private static var strippedPNGAssets:Array<Asset> = [];
 
 	public static function prepareProjectAssets(project:HXProject, targetDirectory:String):Void
 	{
@@ -29,6 +30,7 @@ class ASTCTextureHelper
 		skipped = 0;
 		failed = 0;
 		strippedPNG = 0;
+		strippedPNGAssets = [];
 
 		if (!isEnabled(project))
 			return;
@@ -36,10 +38,14 @@ class ASTCTextureHelper
 		Log.info("", " - \x1b[1mASTC texture conversion enabled:\x1b[0m block=" + getBlockSize(project)
 			+ " quality=" + getQuality(project) + " colorprofile=" + getColorProfile(project)
 			+ " premultiplyAlpha=" + getPremultiplyAlpha(project)
-			+ " smartBlocks=" + getSmartBlocks(project) + " detailBlock=" + getDetailBlockSize(project));
+			+ " smartBlocks=" + getSmartBlocks(project) + " detailBlock=" + getDetailBlockSize(project)
+			+ " largeBlock=" + getLargeBlockSize(project) + " hugeBlock=" + getHugeBlockSize(project)
+			+ " strict=" + getStrict(project));
 
 		if (!hasEncoder())
 		{
+			if (getStrict(project))
+				Log.error("ASTC strict mode is enabled but no ASTC encoder was found. Install `astc-compressor` or set ASTC_ENCODER.");
 			warnMissingEncoder();
 			return;
 		}
@@ -50,11 +56,20 @@ class ASTCTextureHelper
 			existing.set(asset.resourceName, true);
 
 		var stripPNG = project.config.getBool("android.astc-strip-png", true);
+		var strict = getStrict(project);
 		var finalAssets:Array<Asset> = [];
 		for (asset in project.assets)
 		{
-			if (!isPNGAsset(asset, asset.resourceName) || asset.embed == true || asset.sourcePath == null || asset.sourcePath == "")
+			if (!isPNGAsset(asset, asset.resourceName))
 			{
+				finalAssets.push(asset);
+				continue;
+			}
+
+			if (asset.sourcePath == null || asset.sourcePath == "")
+			{
+				if (strict)
+					Log.error("ASTC strict mode cannot convert PNG asset without a source path: " + asset.resourceName);
 				finalAssets.push(asset);
 				continue;
 			}
@@ -63,7 +78,7 @@ class ASTCTextureHelper
 			if (existing.exists(resourceName))
 			{
 				if (stripPNG)
-					strippedPNG++;
+					rememberStrippedPNG(asset);
 				else
 					finalAssets.push(asset);
 				continue;
@@ -85,17 +100,32 @@ class ASTCTextureHelper
 				finalAssets.push(astcAsset);
 				existing.set(resourceName, true);
 				if (stripPNG)
-					strippedPNG++;
+					rememberStrippedPNG(asset);
 				else
 					finalAssets.push(asset);
 			}
 			else
 			{
-				finalAssets.push(asset);
+				if (strict)
+					Log.error("ASTC strict mode failed to convert PNG asset: " + asset.sourcePath + ". PNG fallback is disabled.");
+				else
+					finalAssets.push(asset);
 			}
 		}
 
 		project.assets = finalAssets;
+	}
+
+	public static function getStrippedPNGAssets():Array<Asset>
+	{
+		return strippedPNGAssets;
+	}
+
+	private static function rememberStrippedPNG(asset:Asset):Void
+	{
+		strippedPNG++;
+		if (asset != null)
+			strippedPNGAssets.push(asset.clone());
 	}
 
 	public static function finish(project:HXProject):Void
@@ -121,12 +151,25 @@ class ASTCTextureHelper
 		if (input == null || input == "" || !FileSystem.exists(input))
 			return false;
 
+		if (isFastCacheValid(project, input, output))
+		{
+			cleanupPreparedInput(output + ".premul.png", input);
+			skipped++;
+			return true;
+		}
+
 		var info = analyzeInput(input);
 		var blockSize = getEffectiveBlockSize(project, input, info);
-		var meta = getMeta(project, blockSize);
+		var meta = getMeta(project, input, blockSize);
+		var legacyMeta = getLegacyMeta(project, blockSize);
+		var existingMeta = FileSystem.exists(getMetaPath(output)) ? File.getContent(getMetaPath(output)) : null;
 
-		if (FileSystem.exists(output) && FileSystem.exists(getMetaPath(output)) && !System.isNewer(input, output) && File.getContent(getMetaPath(output)) == meta)
+		if (FileSystem.exists(output)
+			&& !System.isNewer(input, output)
+			&& (existingMeta == meta || existingMeta == legacyMeta))
 		{
+			cleanupPreparedInput(output + ".premul.png", input);
+			File.saveContent(getMetaPath(output), meta);
 			skipped++;
 			return true;
 		}
@@ -144,6 +187,7 @@ class ASTCTextureHelper
 			ok = compressWithAstcenc(project, encoder, source, output, blockSize);
 		else
 			ok = compressWithAstcCompressor(project, source, output, blockSize);
+		cleanupPreparedInput(source, input);
 
 		if (ok && FileSystem.exists(output))
 		{
@@ -184,6 +228,16 @@ class ASTCTextureHelper
 		return sanitize(project.config.getString("android.astc-detail-blocksize", "4x4"), "4x4");
 	}
 
+	private static function getLargeBlockSize(project:HXProject):String
+	{
+		return sanitize(project.config.getString("android.astc-large-blocksize", "8x8"), "8x8");
+	}
+
+	private static function getHugeBlockSize(project:HXProject):String
+	{
+		return sanitize(project.config.getString("android.astc-huge-blocksize", "10x10"), "10x10");
+	}
+
 	private static function getQuality(project:HXProject):String
 	{
 		return sanitize(project.config.getString("android.astc-quality", "thorough"), "thorough");
@@ -202,18 +256,123 @@ class ASTCTextureHelper
 		return project.config.getBool("android.astc-premultiply-alpha", true);
 	}
 
+	private static function getStrict(project:HXProject):Bool
+	{
+		return project.config.getBool("android.astc-strict", project.config.getBool("android.astc-strip-png", true));
+	}
+
 	private static function getSmartBlocks(project:HXProject):Bool
 	{
 		return project.config.getBool("android.astc-smart-blocks", true);
 	}
 
-	private static function getMeta(project:HXProject, blockSize:String):String
+	private static function isFastCacheValid(project:HXProject, input:String, output:String):Bool
+	{
+		if (!FileSystem.exists(output) || !FileSystem.exists(getMetaPath(output)))
+			return false;
+
+		try
+		{
+			var cachedMeta = File.getContent(getMetaPath(output));
+			if (StringTools.startsWith(cachedMeta, getCacheHeader(project, input)))
+				return true;
+
+			return tryUpgradeLegacyCache(project, input, output, cachedMeta);
+		}
+		catch (e:Dynamic) {}
+
+		return false;
+	}
+
+	private static function tryUpgradeLegacyCache(project:HXProject, input:String, output:String, cachedMeta:String):Bool
+	{
+		if (cachedMeta == null || cachedMeta == "" || System.isNewer(input, output))
+			return false;
+
+		var blockSize = getMetaValue(cachedMeta, "block");
+		if (blockSize == null || blockSize == "")
+			return false;
+
+		if (cachedMeta != getLegacyMeta(project, blockSize))
+			return false;
+
+		File.saveContent(getMetaPath(output), getMeta(project, input, blockSize));
+		return true;
+	}
+
+	private static function getMetaValue(meta:String, key:String):String
+	{
+		if (meta == null)
+			return null;
+
+		var prefix = key + "=";
+		for (line in meta.split("\n"))
+		{
+			if (StringTools.startsWith(line, prefix))
+				return line.substr(prefix.length);
+		}
+
+		return null;
+	}
+
+	private static function getMeta(project:HXProject, input:String, blockSize:String):String
+	{
+		return getCacheHeader(project, input)
+			+ "block=" + blockSize
+			+ "\n";
+	}
+
+	private static function getCacheHeader(project:HXProject, input:String):String
+	{
+		return "version=2"
+			+ "\nsource=" + getSourceSignature(input)
+			+ "\nsettings=" + getSettingsSignature(project)
+			+ "\n";
+	}
+
+	private static function getSourceSignature(input:String):String
+	{
+		try
+		{
+			var stat = FileSystem.stat(input);
+			return normalize(input) + "|" + stat.size + "|" + Std.int(stat.mtime.getTime());
+		}
+		catch (e:Dynamic) {}
+
+		return normalize(input) + "|missing|0";
+	}
+
+	private static function getSettingsSignature(project:HXProject):String
+	{
+		return [
+			"block=" + getBlockSize(project),
+			"quality=" + getQuality(project),
+			"colorprofile=" + getColorProfile(project),
+			"premultiplyAlpha=" + getPremultiplyAlpha(project),
+			"smartBlocks=" + getSmartBlocks(project),
+			"detailBlock=" + getDetailBlockSize(project),
+			"largeBlock=" + getLargeBlockSize(project),
+			"hugeBlock=" + getHugeBlockSize(project),
+			"detailMaxSide=" + project.config.getInt("android.astc-detail-max-side", 1024),
+			"detailMinSide=" + project.config.getInt("android.astc-detail-min-side", 256),
+			"detailAlphaMaxPixels=" + project.config.getInt("android.astc-detail-alpha-max-pixels", 1048576),
+			"largePixels=" + project.config.getInt("android.astc-large-pixels", 4194304),
+			"hugePixels=" + project.config.getInt("android.astc-huge-pixels", 16777216),
+			"largeMaxSide=" + project.config.getInt("android.astc-large-max-side", 2048),
+			"hugeMaxSide=" + project.config.getInt("android.astc-huge-max-side", 4096),
+			"detailAlphaRatio=" + project.config.getFloat("android.astc-detail-alpha-ratio", 0.08),
+			"detailSemiAlphaRatio=" + project.config.getFloat("android.astc-detail-semi-alpha-ratio", 0.01)
+		].join("|");
+	}
+
+	private static function getLegacyMeta(project:HXProject, blockSize:String):String
 	{
 		return "block=" + blockSize
 			+ "\nquality=" + getQuality(project)
 			+ "\ncolorprofile=" + getColorProfile(project)
 			+ "\npremultiplyAlpha=" + getPremultiplyAlpha(project)
 			+ "\nsmartBlocks=" + getSmartBlocks(project)
+			+ "\nstrict=" + getStrict(project)
 			+ "\n";
 	}
 
@@ -285,6 +444,22 @@ class ASTCTextureHelper
 		}
 	}
 
+	private static function cleanupPreparedInput(source:String, original:String):Void
+	{
+		if (source == null || source == "" || source == original)
+			return;
+
+		if (!StringTools.endsWith(source.toLowerCase(), ".premul.png"))
+			return;
+
+		try
+		{
+			if (FileSystem.exists(source))
+				FileSystem.deleteFile(source);
+		}
+		catch (e:Dynamic) {}
+	}
+
 	private static function analyzeInput(input:String):ASTCImageInfo
 	{
 		var info = new ASTCImageInfo();
@@ -302,6 +477,7 @@ class ASTCTextureHelper
 
 			info.width = image.width;
 			info.height = image.height;
+			info.pixels = pixels;
 
 			var transparent = 0;
 			var semiTransparent = 0;
@@ -336,6 +512,11 @@ class ASTCTextureHelper
 		var minSide = Std.int(Math.min(info.width, info.height));
 		var detailMaxSide = project.config.getInt("android.astc-detail-max-side", 1024);
 		var detailMinSide = project.config.getInt("android.astc-detail-min-side", 256);
+		var detailAlphaMaxPixels = project.config.getInt("android.astc-detail-alpha-max-pixels", 1048576);
+		var largePixels = project.config.getInt("android.astc-large-pixels", 4194304);
+		var hugePixels = project.config.getInt("android.astc-huge-pixels", 16777216);
+		var largeMaxSide = project.config.getInt("android.astc-large-max-side", 2048);
+		var hugeMaxSide = project.config.getInt("android.astc-huge-max-side", 4096);
 		var alphaRatio = project.config.getFloat("android.astc-detail-alpha-ratio", 0.08);
 		var semiAlphaRatio = project.config.getFloat("android.astc-detail-semi-alpha-ratio", 0.01);
 
@@ -357,11 +538,15 @@ class ASTCTextureHelper
 
 		if (sensitivePath)
 			return detailBlock;
+		if (info.pixels >= hugePixels || maxSide >= hugeMaxSide)
+			return getHugeBlockSize(project);
+		if (info.pixels >= largePixels || maxSide >= largeMaxSide)
+			return getLargeBlockSize(project);
 		if (maxSide <= detailMaxSide)
 			return detailBlock;
 		if (minSide <= detailMinSide)
 			return detailBlock;
-		if (info.transparentRatio >= alphaRatio || info.semiTransparentRatio >= semiAlphaRatio)
+		if (info.pixels <= detailAlphaMaxPixels && (info.transparentRatio >= alphaRatio || info.semiTransparentRatio >= semiAlphaRatio))
 			return detailBlock;
 
 		return baseBlock;
@@ -605,6 +790,7 @@ private class ASTCImageInfo
 {
 	public var width:Int = 0;
 	public var height:Int = 0;
+	public var pixels:Int = 0;
 	public var transparentRatio:Float = 0;
 	public var semiTransparentRatio:Float = 0;
 

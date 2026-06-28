@@ -21,6 +21,7 @@ import haxe.xml.Fast as Access;
 class ProjectXMLParser extends HXProject
 {
 	public var includePaths:Array<String>;
+	private var reuseAndroidAssetsSkipLogged:Bool = false;
 
 	private static var doubleVarMatch = new EReg("\\$\\${(.*?)}", "");
 	private static var varMatch = new EReg("\\${(.*?)}", "");
@@ -505,6 +506,10 @@ class ProjectXMLParser extends HXProject
 			Log.error("In order to use 'include' or 'exclude' on <asset /> nodes, you must specify also specify a 'path' attribute");
 			return;
 		}
+		else if (shouldSkipDirectoryAssetForAndroidReuse(path, isTemplate))
+		{
+			return;
+		}
 		else if (!element.elements.hasNext())
 		{
 			// Empty element
@@ -726,6 +731,78 @@ class ProjectXMLParser extends HXProject
 				}
 			}
 		}
+	}
+
+	private function shouldSkipDirectoryAssetForAndroidReuse(path:String, isTemplate:Bool):Bool
+	{
+		if (isTemplate || path == "" || !isAndroidReuseAssetsEnabledForParser())
+			return false;
+
+		if (!FileSystem.exists(path) || !FileSystem.isDirectory(path))
+			return false;
+
+		if (!hasReusableAndroidOutput())
+			return false;
+
+		if (!reuseAndroidAssetsSkipLogged)
+		{
+			Log.info("", " - \x1b[1mSkipping project asset directory parsing:\x1b[0m ANDROID_REUSE_ASSETS enabled");
+			reuseAndroidAssetsSkipLogged = true;
+		}
+
+		return true;
+	}
+
+	private function isAndroidReuseAssetsEnabledForParser():Bool
+	{
+		return defines.exists("ANDROID_REUSE_ASSETS")
+			|| haxedefs.exists("ANDROID_REUSE_ASSETS")
+			|| targetFlags.exists("ANDROID_REUSE_ASSETS")
+			|| targetFlags.exists("reuse-assets")
+			|| hasEnvironmentFlag("ANDROID_REUSE_ASSETS")
+			|| hasCommandLineFlag("ANDROID_REUSE_ASSETS");
+	}
+
+	private function hasEnvironmentFlag(name:String):Bool
+	{
+		var value = Sys.getEnv(name);
+		if (value == null)
+			return false;
+
+		value = StringTools.trim(value).toLowerCase();
+		return value == "1" || value == "true" || value == "yes" || value == "on";
+	}
+
+	private function hasCommandLineFlag(name:String):Bool
+	{
+		for (arg in Sys.args())
+		{
+			if (arg == name || arg == "-D" + name || arg.indexOf(name) != -1)
+				return true;
+		}
+
+		return false;
+	}
+
+	private function hasReusableAndroidOutput():Bool
+	{
+		var androidOutput = Path.combine(Sys.getCwd(), "export/release/android");
+		var assetsDirectory = Path.combine(androidOutput, "bin/app/src/main/assets");
+		var haxeDirectory = Path.combine(androidOutput, "haxe");
+
+		if (!FileSystem.exists(assetsDirectory) || !FileSystem.isDirectory(assetsDirectory))
+			return false;
+
+		if (!FileSystem.exists(haxeDirectory) || !FileSystem.isDirectory(haxeDirectory))
+			return false;
+
+		for (entry in FileSystem.readDirectory(haxeDirectory))
+		{
+			if (Path.extension(entry).toLowerCase() == "hxml")
+				return true;
+		}
+
+		return false;
 	}
 
 	private function parseAssetsElementDirectory(path:String, targetPath:String, include:String, exclude:String, type:AssetType, embed:Null<Bool>,

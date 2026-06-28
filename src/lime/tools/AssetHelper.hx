@@ -61,6 +61,22 @@ class AssetHelper
 		return true;
 	}
 
+	private static function isFileCopyCurrent(source:String, destination:String):Bool
+	{
+		if (source == null || source == "" || !FileSystem.exists(source) || !FileSystem.exists(destination))
+			return false;
+
+		try
+		{
+			var sourceStat = FileSystem.stat(source);
+			var destinationStat = FileSystem.stat(destination);
+			return sourceStat.size == destinationStat.size && sourceStat.mtime.getTime() <= destinationStat.mtime.getTime();
+		}
+		catch (e:Dynamic) {}
+
+		return false;
+	}
+
 	private static function getAssetBytes(asset:Asset):Bytes
 	{
 		if (asset == null)
@@ -257,6 +273,9 @@ class AssetHelper
 
 		if (asset.sourcePath != "")
 		{
+			if (isFileCopyCurrent(asset.sourcePath, destination))
+				return;
+
 			if (System.isNewer(asset.sourcePath, destination))
 			{
 				System.copyFile(asset.sourcePath, destination, null, asset.type == TEMPLATE);

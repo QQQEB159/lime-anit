@@ -27,6 +27,7 @@ import sys.FileSystem;
 class AndroidPlatform extends PlatformTarget
 {
 	private var deviceID:String;
+	private var cleanedASTCOutputPaths:Map<String, Bool> = [];
 	private static var embeddedModOutputFormats = [
 		"json" => true,
 		"xml" => true,
@@ -220,6 +221,237 @@ class AndroidPlatform extends PlatformTarget
 		}
 
 		Log.info("", " - \x1b[1mChecked embedded Android mod format outputs:\x1b[0m " + removed + " removed");
+	}
+
+	private function cleanASTCPNGOutputs(sourceSet:String, destination:String):Void
+	{
+		if (!project.config.getBool("android.astc-textures", true) || !project.config.getBool("android.astc-strip-png", true))
+		{
+			return;
+		}
+
+		if (project.config.getBool("android.astc-fast-clean", true))
+		{
+			var removed = 0;
+			var checked = 0;
+			var verbose = project.config.getBool("android.astc-clean-verbose", false);
+
+			for (asset in ASTCTextureHelper.getStrippedPNGAssets())
+			{
+				if (asset == null || asset.resourceName == null || asset.resourceName == "")
+					continue;
+
+				var root = asset.deliveryPackName != null && asset.deliveryPackName != ""
+					? destination + "/" + asset.deliveryPackName + "/src/main/assets"
+					: sourceSet + "/assets";
+				root = Path.standardize(root);
+
+				var path = Path.standardize(Path.combine(root, asset.resourceName));
+				if (!Path.startsWith(path, root))
+					Log.error("Refusing to clean Android PNG output outside root: " + path);
+
+				if (cleanedASTCOutputPaths.exists(path))
+					continue;
+				cleanedASTCOutputPaths.set(path, true);
+				checked++;
+
+				if (!FileSystem.exists(path))
+					continue;
+
+				if (verbose)
+					Log.info("", " - \x1b[1mRemoving stripped asset from ASTC Android output:\x1b[0m " + path);
+
+				try
+				{
+					if (FileSystem.isDirectory(path))
+						System.removeDirectory(path);
+					else
+						FileSystem.deleteFile(path);
+				}
+				catch (e:Dynamic)
+				{
+					Log.error("Stripped asset is still present in ASTC Android output: " + path);
+				}
+
+				if (FileSystem.exists(path))
+					Log.error("Stripped asset is still present in ASTC Android output: " + path);
+
+				removed++;
+				cleanEmptyDirectories(Path.directory(path), root);
+			}
+
+			Log.info("", " - \x1b[1mChecked ASTC Android stripped outputs:\x1b[0m " + checked + " exact paths, " + removed + " removed");
+			return;
+		}
+
+		var roots:Array<String> = [sourceSet + "/assets"];
+		var packRoots:Map<String, Bool> = [];
+
+		for (asset in project.assets)
+		{
+			if (asset != null && asset.deliveryPackName != null && asset.deliveryPackName != "" && !packRoots.exists(asset.deliveryPackName))
+			{
+				packRoots.set(asset.deliveryPackName, true);
+				roots.push(destination + "/" + asset.deliveryPackName + "/src/main/assets");
+			}
+		}
+
+		var removed = 0;
+
+		function recurse(root:String, directory:String):Void
+		{
+			if (!FileSystem.exists(directory) || !FileSystem.isDirectory(directory))
+			{
+				return;
+			}
+
+			for (entry in FileSystem.readDirectory(directory))
+			{
+				var path = Path.standardize(Path.combine(directory, entry));
+
+				if (!Path.startsWith(path, root))
+				{
+					Log.error("Refusing to clean Android PNG output outside root: " + path);
+				}
+
+				if (FileSystem.isDirectory(path))
+				{
+					recurse(root, path);
+				}
+				else if (isASTCStrippedOutputExtension(Path.extension(path).toLowerCase()))
+				{
+					Log.info("", " - \x1b[1mRemoving stripped asset from ASTC Android output:\x1b[0m " + path);
+
+					try
+					{
+						FileSystem.deleteFile(path);
+					}
+					catch (e:Dynamic)
+					{
+						Log.error("Stripped asset is still present in ASTC Android output: " + path);
+					}
+
+					if (FileSystem.exists(path))
+					{
+						Log.error("Stripped asset is still present in ASTC Android output: " + path);
+					}
+
+					removed++;
+				}
+			}
+		}
+
+		for (root in roots)
+		{
+			root = Path.standardize(root);
+			recurse(root, root);
+			if (FileSystem.exists(root) && FileSystem.isDirectory(root))
+			{
+				for (entry in FileSystem.readDirectory(root))
+				{
+					var path = Path.standardize(Path.combine(root, entry));
+					if (FileSystem.isDirectory(path))
+					{
+						cleanEmptyDirectories(path, root);
+					}
+				}
+			}
+		}
+
+		Log.info("", " - \x1b[1mChecked ASTC Android stripped outputs:\x1b[0m " + removed + " removed");
+	}
+
+	private function isASTCStrippedOutputExtension(extension:String):Bool
+	{
+		return switch (extension)
+		{
+			case "png", "png~", "kra", "kra~", "psd", "psb", "clip", "xcf": true;
+			default: false;
+		}
+	}
+
+	private function shouldSkipASTCStrippedAndroidAsset(asset:Asset):Bool
+	{
+		if (!project.config.getBool("android.astc-textures", true) || !project.config.getBool("android.astc-strip-png", true))
+		{
+			return false;
+		}
+
+		return isASTCStrippedOutputExtension(Path.extension(asset.resourceName).toLowerCase());
+	}
+
+	private function shouldReuseAndroidAssetOutput():Bool
+	{
+		if (project == null || !isReuseAndroidAssetsEnabled())
+		{
+			return false;
+		}
+
+		var gradleProject = project.config.getString("android.gradle-project-directory", "bin");
+		var destination = targetDirectory + "/" + gradleProject;
+		var sourceSet = destination + "/app/src/main";
+		var haxeDirectory = targetDirectory + "/haxe";
+		var hasHXML = false;
+
+		if (FileSystem.exists(haxeDirectory) && FileSystem.isDirectory(haxeDirectory))
+		{
+			for (entry in FileSystem.readDirectory(haxeDirectory))
+			{
+				if (Path.extension(entry).toLowerCase() == "hxml")
+				{
+					hasHXML = true;
+					break;
+				}
+			}
+		}
+
+		var missing:Array<String> = [];
+		if (!FileSystem.exists(destination + "/app/build.gradle"))
+			missing.push(destination + "/app/build.gradle");
+		if (!FileSystem.exists(sourceSet + "/assets"))
+			missing.push(sourceSet + "/assets");
+		if (!hasHXML)
+			missing.push(haxeDirectory + "/*.hxml");
+
+		if (missing.length > 0)
+		{
+			Log.warn("ANDROID_REUSE_ASSETS requested but cached Android output is incomplete; running normal asset update. Missing: " + missing.join(", "));
+			return false;
+		}
+
+		Log.info("", " - \x1b[1mReusing Android assets/project output:\x1b[0m ANDROID_REUSE_ASSETS enabled");
+		return true;
+	}
+
+	private function isReuseAndroidAssetsEnabled():Bool
+	{
+		return project.config.getBool("android.reuse-assets", false)
+			|| (project.haxedefs != null && project.haxedefs.exists("ANDROID_REUSE_ASSETS"))
+			|| (project.targetFlags != null && project.targetFlags.exists("ANDROID_REUSE_ASSETS"))
+			|| (project.targetFlags != null && project.targetFlags.exists("reuse-assets"))
+			|| hasEnvironmentFlag("ANDROID_REUSE_ASSETS")
+			|| hasCommandLineFlag("ANDROID_REUSE_ASSETS");
+	}
+
+	private function hasEnvironmentFlag(name:String):Bool
+	{
+		var value = Sys.getEnv(name);
+		if (value == null)
+			return false;
+
+		value = StringTools.trim(value).toLowerCase();
+		return value == "1" || value == "true" || value == "yes" || value == "on";
+	}
+
+	private function hasCommandLineFlag(name:String):Bool
+	{
+		for (arg in Sys.args())
+		{
+			if (arg == name || arg == "-D" + name || arg.indexOf(name) != -1)
+				return true;
+		}
+
+		return false;
 	}
 
 	public function new(command:String, _project:HXProject, targetFlags:Map<String, String>)
@@ -657,6 +889,11 @@ class AndroidPlatform extends PlatformTarget
 
 	public override function update():Void
 	{
+		if (shouldReuseAndroidAssetOutput())
+		{
+			return;
+		}
+
 		ASTCTextureHelper.prepareProjectAssets(project, targetDirectory);
 		AssetHelper.processLibraries(project, targetDirectory);
 
@@ -694,11 +931,22 @@ class AndroidPlatform extends PlatformTarget
 		context.ANDROID_PLAY_ASSETS_DELIVERY_PACKS = [];
 		cleanEmbeddedAndroidAssetOutputs(sourceSet, destination);
 		cleanEmbeddedAndroidModFormatOutputs(sourceSet);
+		cleanASTCPNGOutputs(sourceSet, destination);
+		var astcCleanVerbose = project.config.getBool("android.astc-clean-verbose", false);
 
 		for (asset in project.assets)
 		{
 			if (asset.embed != true && asset.type != AssetType.TEMPLATE)
 			{
+				if (shouldSkipASTCStrippedAndroidAsset(asset))
+				{
+					if (astcCleanVerbose)
+					{
+						Log.info("", " - \x1b[1mSkipping stripped ASTC source asset:\x1b[0m " + asset.resourceName);
+					}
+					continue;
+				}
+
 				if (asset.deliveryPackName != '')
 				{
 					var assetDestination = Path.combine(destination + "/" + asset.deliveryPackName + "/src/main/assets/", asset.resourceName);
@@ -726,6 +974,7 @@ class AndroidPlatform extends PlatformTarget
 
 		cleanEmbeddedAndroidAssetOutputs(sourceSet, destination);
 		cleanEmbeddedAndroidModFormatOutputs(sourceSet);
+		cleanASTCPNGOutputs(sourceSet, destination);
 
 		context.CPP_DIR = targetDirectory + "/obj";
 		context.OUTPUT_DIR = targetDirectory;
@@ -965,6 +1214,8 @@ class AndroidPlatform extends PlatformTarget
 				AssetHelper.copyAsset(asset, targetPath, context);
 			}
 		}
+
+		cleanASTCPNGOutputs(sourceSet, destination);
 	}
 
 	public override function watch():Void
