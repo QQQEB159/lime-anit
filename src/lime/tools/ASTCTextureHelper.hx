@@ -559,6 +559,7 @@ class ASTCTextureHelper
 		if (!StringTools.startsWith(quality, "-"))
 			quality = "-" + quality;
 
+		ensureExecutable(encoder);
 		var code = System.runCommand("", encoder, [profile, input, output, blockSize, quality], true, true);
 		return code == 0;
 	}
@@ -701,7 +702,10 @@ class ASTCTextureHelper
 		checkedEncoder = true;
 		encoderPath = sanitize(Sys.getEnv("ASTC_ENCODER"), null);
 		if (encoderPath != null && FileSystem.exists(encoderPath))
+		{
+			ensureExecutable(encoderPath);
 			return encoderPath;
+		}
 
 		encoderPath = findBundledAstcCompressorEncoder();
 		if (encoderPath != null && encoderPath != "")
@@ -758,6 +762,14 @@ class ASTCTextureHelper
 			for (pluginDir in pluginDirs)
 			{
 				var dir = pluginDir == "" ? root : Path.combine(root, pluginDir);
+				// haxelib may strip executable permissions from bundled binaries,
+				// so restore them for every encoder in the directory
+				for (name in getEncoderNames())
+				{
+					var binary = Path.combine(dir, name);
+					if (FileSystem.exists(binary))
+						ensureExecutable(binary);
+				}
 				for (name in getEncoderNames())
 				{
 					var candidate = Path.combine(dir, name);
@@ -775,6 +787,18 @@ class ASTCTextureHelper
 		if (Sys.systemName() == "Windows")
 			return ["astcenc-avx2.exe", "astcenc-sse4.1.exe", "astcenc-sse2.exe", "astcenc.exe"];
 		return ["astcenc-avx2", "astcenc-sse4.1", "astcenc-sse2", "astcenc"];
+	}
+
+	private static function ensureExecutable(path:String):Void
+	{
+		if (path == null || path == "" || Sys.systemName() == "Windows")
+			return;
+
+		try
+		{
+			Sys.command("chmod", ["+x", path]);
+		}
+		catch (e:Dynamic) {}
 	}
 
 	private static function warnMissingEncoder():Void
