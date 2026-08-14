@@ -164,10 +164,10 @@ class ASTCTextureHelper
     	return false;
     }
     
-    private static function loadCompressionExcludes(project:HXProject):Array<String>
+    private static function loadCompressionExcludes():Array<String>
     {
     	var result:Array<String> = [];
-    	var file = Path.combine(project.directory, "compression-excludes.txt");
+    	var file = "./compression-excludes.txt";
     
     	if (!FileSystem.exists(file))
     		return result;
@@ -325,7 +325,7 @@ class ASTCTextureHelper
 	private static function ensureCompressionExcludes(project:HXProject):Void
     {
     	if (compressionExcludes == null)
-    		compressionExcludes = loadCompressionExcludes(project);
+    		compressionExcludes = loadCompressionExcludes();
     }
 	
 	private static function isPNGAsset(asset:Asset, destination:String):Bool
