@@ -1,0 +1,4 @@
+mods/dustin/images/characters/perseverance/sans_pixel.png
+mods/dustin/images/characters/perseverance/pico_pixel.png
+mods/dustin/images/characters/sixbones/sixbones_3.png
+mods/dustin/images/mobile/*
