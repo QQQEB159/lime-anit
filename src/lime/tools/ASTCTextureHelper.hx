@@ -150,6 +150,8 @@ class ASTCTextureHelper
 
 		if (!isEnabled(project))
 			return;
+			
+		var excludes = loadCompressionExcludes(project);
 
 		Log.info("", " - \x1b[1mASTC texture conversion enabled:\x1b[0m block=" + getBlockSize(project)
 			+ " quality=" + getQuality(project) + " colorprofile=" + getColorProfile(project)
