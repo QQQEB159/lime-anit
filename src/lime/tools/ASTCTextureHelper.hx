@@ -23,123 +23,11 @@ class ASTCTextureHelper
 	private static var failed:Int = 0;
 	private static var strippedPNG:Int = 0;
 	private static var strippedPNGAssets:Array<Asset> = [];
+	private static var checkedEncoder:Bool = false;
+    private static var encoderPath:String = null;
+    private static var compressorAvailable:Null<Bool> = null;
     private static var compressionExcludes:Array<String> = null;
-    private static var compressionExcludesLoaded:Bool = false;
-    
-    private static function loadCompressionExcludes(project:HXProject):Array<String>
-    {
-        if (compressionExcludesLoaded)
-            return compressionExcludes;
-    
-        compressionExcludesLoaded = true;
-        compressionExcludes = [];
-    
-        var excludeFile = getCompressionExcludesPath(project);
-        if (excludeFile == null || !FileSystem.exists(excludeFile))
-            return compressionExcludes;
-    
-        try
-        {
-            var content = File.getContent(excludeFile);
-            for (line in content.split("\n"))
-            {
-                line = StringTools.trim(line);
-                if (line == "" || StringTools.startsWith(line, "#"))
-                    continue;
-                compressionExcludes.push(line);
-            }
-        }
-        catch (e:Dynamic)
-        {
-            Log.warn("Failed to read compression-excludes.txt: " + e);
-        }
-    
-        return compressionExcludes;
-    }
-    
-    private static function getCompressionExcludesPath(project:HXProject):String
-    {
-        if (project == null) return null;
-    
-        var roots:Array<String> = [];
-        if (project.app != null && project.app.path != null && project.app.path != "")
-            roots.push(project.app.path);
-        if (project.path != null && project.path != "")
-            roots.push(project.path);
-        if (project.directory != null && project.directory != "")
-            roots.push(project.directory);
-        roots.push(Sys.getCwd());
-    
-        for (root in roots)
-        {
-            var candidate = Path.combine(root, "compression-excludes.txt");
-            if (FileSystem.exists(candidate))
-                return candidate;
-        }
-        return null;
-    }
-	
-	private static function isExcluded(asset:Asset, excludes:Array<String>):Bool
-    {
-        if (excludes == null || excludes.length == 0)
-            return false;
-    
-        var resourceName = normalize(asset.resourceName);
-        var sourcePath = asset.sourcePath != null ? normalize(asset.sourcePath) : null;
-    
-        for (pattern in excludes)
-        {
-            var p = normalize(pattern);
-            if (StringTools.startsWith(p, "./"))
-                p = p.substr(2);
-    
-            if (globMatches(p, resourceName))
-                return true;
-            if (sourcePath != null && (globMatches(p, sourcePath) || StringTools.endsWith(sourcePath, p)))
-                return true;
-        }
-        return false;
-    }
-    
-    private static function globMatches(pattern:String, value:String):Bool
-    {
-        if (pattern == null || value == null)
-            return false;
-    
-        pattern = normalize(pattern);
-        value = normalize(value);
-        if (StringTools.startsWith(pattern, "./"))
-            pattern = pattern.substr(2);
-    
-        var regex = "^";
-        for (i in 0...pattern.length)
-        {
-            var c = pattern.charAt(i);
-            switch (c)
-            {
-                case "*":
-                    regex += ".*";
-                case "?":
-                    regex += ".";
-                case '.', '(', ')', '+', '|', '^', '$', '@', '%', '\\', '[', ']', '{', '}':
-                    regex += "\\" + c;
-                default:
-                    regex += c;
-            }
-        }
-        regex += "$";
-    
-        try
-        {
-            var ereg = new EReg(regex, "i");
-            return ereg.match(value);
-        }
-        catch (e:Dynamic)
-        {
-            return value == pattern;
-        }
-    }
-	
+
 	public static function prepareProjectAssets(project:HXProject, targetDirectory:String):Void
 	{
 		converted = 0;
@@ -147,11 +35,10 @@ class ASTCTextureHelper
 		failed = 0;
 		strippedPNG = 0;
 		strippedPNGAssets = [];
+		ensureCompressionExcludes(project);
 
 		if (!isEnabled(project))
 			return;
-			
-		var excludes = loadCompressionExcludes(project);
 
 		Log.info("", " - \x1b[1mASTC texture conversion enabled:\x1b[0m block=" + getBlockSize(project)
 			+ " quality=" + getQuality(project) + " colorprofile=" + getColorProfile(project)
@@ -178,17 +65,18 @@ class ASTCTextureHelper
 		var finalAssets:Array<Asset> = [];
 		for (asset in project.assets)
 		{
+			if (shouldExcludeCompression(asset))
+            {
+            	Log.info("", " - ASTC excluded: " + asset.resourceName);
+            	finalAssets.push(asset);
+            	continue;
+            }
+			
 			if (!isPNGAsset(asset, asset.resourceName))
 			{
 				finalAssets.push(asset);
 				continue;
 			}
-			
-			if (isExcluded(asset, excludes))
-            {
-                finalAssets.push(asset);
-                continue;
-            }
 
 			if (asset.sourcePath == null || asset.sourcePath == "")
 			{
@@ -240,6 +128,99 @@ class ASTCTextureHelper
 		project.assets = finalAssets;
 	}
 
+	private static function shouldExcludeCompression(asset:Asset, extraPath:String = null):Bool
+    {
+    	if (compressionExcludes == null || compressionExcludes.length == 0)
+    		return false;
+    
+    	var paths:Array<String> = [];
+    
+    	if (asset != null)
+    	{
+    		if (asset.resourceName != null)
+    			paths.push(asset.resourceName);
+    
+    		if (asset.sourcePath != null)
+    			paths.push(asset.sourcePath);
+    
+    		if (asset.targetPath != null)
+    			paths.push(asset.targetPath);
+    	}
+    
+    	if (extraPath != null)
+    		paths.push(extraPath);
+    
+    	for (path in paths)
+    	{
+    		var normalized = normalize(path);
+    
+    		for (rule in compressionExcludes)
+    		{
+    			if (matchExcludeRule(normalized, rule))
+    				return true;
+    		}
+    	}
+    
+    	return false;
+    }
+    
+    private static function loadCompressionExcludes(project:HXProject):Array<String>
+    {
+    	var result:Array<String> = [];
+    	var file = Path.combine(project.directory, "compression-excludes.txt");
+    
+    	if (!FileSystem.exists(file))
+    		return result;
+    
+    	try
+    	{
+    		var content = File.getContent(file);
+    
+    		for (line in content.split("\n"))
+    		{
+    			line = StringTools.trim(line);
+    
+    			if (line == "" || StringTools.startsWith(line, "#"))
+    				continue;
+    
+    			result.push(normalize(line));
+    		}
+    	}
+    	catch (e:Dynamic)
+    	{
+    		Log.warn("Failed to read compression-excludes.txt: " + e);
+    	}
+    
+    	return result;
+    }
+    
+    private static function matchExcludeRule(path:String, rule:String):Bool
+    {
+    	path = path.toLowerCase();
+    	rule = rule.toLowerCase();
+    
+    	if (rule.indexOf("*") == -1)
+    		return path == rule;
+    
+    	var parts = rule.split("*");
+    	var index = 0;
+    
+    	for (part in parts)
+    	{
+    		if (part == "")
+    			continue;
+    
+    		var found = path.indexOf(part, index);
+    
+    		if (found == -1)
+    			return false;
+    
+    		index = found + part.length;
+    	}
+    
+    	return true;
+    }
+	
 	public static function getStrippedPNGAssets():Array<Asset>
 	{
 		return strippedPNGAssets;
@@ -262,16 +243,21 @@ class ASTCTextureHelper
 	}
 
 	public static function compressCopiedAsset(project:HXProject, asset:Asset, destination:String):Void
-	{
-		if (!isEnabled(project) || !isPNGAsset(asset, destination))
-			return;
-			
-		if (isExcluded(asset, loadCompressionExcludes(project)))
-            return;
-
-		var output = Path.withoutExtension(destination) + ".astc";
-		compressPNG(project, destination, output);
-	}
+    {
+    	if (!isEnabled(project) || !isPNGAsset(asset, destination))
+    		return;
+    
+    	ensureCompressionExcludes(project);
+    
+    	if (shouldExcludeCompression(asset, destination))
+    	{
+    		Log.info("", " - ASTC excluded: " + destination);
+    		return;
+    	}
+    
+    	var output = Path.withoutExtension(destination) + ".astc";
+    	compressPNG(project, destination, output);
+    }
 
 	private static function compressPNG(project:HXProject, input:String, output:String):Bool
 	{
@@ -336,6 +322,12 @@ class ASTCTextureHelper
 		return project != null && project.config.getBool("android.astc-textures", true);
 	}
 
+	private static function ensureCompressionExcludes(project:HXProject):Void
+    {
+    	if (compressionExcludes == null)
+    		compressionExcludes = loadCompressionExcludes(project);
+    }
+	
 	private static function isPNGAsset(asset:Asset, destination:String):Bool
 	{
 		if (asset == null || destination == null)
